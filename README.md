@@ -3,7 +3,6 @@
   <img src="https://img.shields.io/badge/unsafe_blocks-2_total-00d4aa?style=flat-square&labelColor=0d1117" />
   <img src="https://img.shields.io/badge/binary-static_musl-a78bfa?style=flat-square&labelColor=0d1117" />
   <img src="https://img.shields.io/badge/toolchain-zig_cc-fbbf24?style=flat-square&labelColor=0d1117" />
-  <img src="https://img.shields.io/badge/status-design_concept-38bdf8?style=flat-square&labelColor=0d1117" />
 </p>
 
 <h1 align="center">gxgr</h1>
@@ -514,23 +513,6 @@ gag16   nested  Go→Rust callback (16 slots)
 
 ---
 
-## Roadmap
-
-| Phase | Milestone | Status |
-|-------|-----------|--------|
-| v0.1 | gxo registry, ga templates (all tiers), gxN struct | 🔵 design |
-| v0.2 | xg Go hatch entrypoint, bridge_out, SignalDone/Panic | ⬜ pending |
-| v0.3 | Supervision tree, reaper, timeout enforcement | ⬜ pending |
-| v0.4 | gp/gs hierarchy, child reaping on parent death | ⬜ pending |
-| v0.5 | gag nested Rust calls, bridge_in, depth limit | ⬜ pending |
-| v0.6 | gxr CLI (start/stop/restart/status) | ⬜ pending |
-| v0.7 | zig cc build pipeline, musl static binary | ⬜ pending |
-| v0.8 | cycle budget enforcement | ⬜ pending |
-| v0.9 | cross-compilation (arm64, riscv64) | ⬜ pending |
-| v1.0 | stable API → crates.io/gxgr + go mod xg-\* | ⬜ pending |
-
----
-
 ## Publishing
 
 ```
@@ -575,9 +557,7 @@ Systems-level software where you need both memory control AND high concurrency:
 - Daemon supervisors
 - Network proxies
 - Security-critical tooling
-- Embedded daemons (static binary, runs anywhere Linux)
-
-It is **not** a web framework. It is **not** for REST APIs. It lives close to the OS.
+- Embedded daemons (static binary, runs anywhere Linux, windows, mac, android, etc)
 
 ---
 
