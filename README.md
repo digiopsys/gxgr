@@ -627,3 +627,207 @@ community naming convention:
 → gx-network, gx-io, gx-db, gx-yourproject
 → search "gx-" on pkg.go.dev finds them all
 ```
+
+# gxgr — Q&A
+
+---
+
+### Why use gxgr if I just want async? Why not just use Go?
+
+If you **only need async, just use Go.** gxgr isn't for that.
+
+gxgr is for when you need **both** at the same time:
+
+| You need from Go | You need from Rust |
+|------------------|--------------------|
+| Concurrent connections | Memory safety without GC |
+| Goroutine fan-out | Ownership model |
+| Channel pipelines | Compile-time correctness |
+| Network event loops | Systems-level control |
+
+Pure Go gives you great async but the GC owns your memory — it can pause, it can't be reasoned about at the systems level. Pure Rust gives you memory safety but async requires ~150 unsafe blocks just to build the runtime. gxgr says: **let Go own the concurrency, let Rust own the memory.** If you only need one of those things — use that one language.
+
+---
+
+### What is gxgr actually designed to build?
+
+Systems-level software where you need both memory control AND high concurrency:
+
+- Init systems (systemd replacement)
+- Container runtimes
+- Daemon supervisors
+- Network proxies
+- Security-critical tooling
+- Embedded daemons (static binary, runs anywhere Linux)
+
+It is **not** a web framework. It is **not** for REST APIs. It lives close to the OS.
+
+---
+
+### What are gxo, gxr, and gxN?
+
+| File | Role | Runs? |
+|------|------|-------|
+| `gxo.rs` | 📋 Registry — templates, rules, gxN definitions. Pure static const data. | ❌ Never |
+| `gxr.rs` | 🎛️ Runner — starts/stops/restarts gxN. Ephemeral coordinator. | ✅ Briefly, then exits |
+| `gxN.rs` | ✋ Supervisor hands — each independently owns its arena pool and worker tree. | ✅ Until stopped |
+
+No singleton. `gx1` can crash without affecting `gx2` or `gx3`. `gxo` is immortal because it never runs — it is just data.
+
+---
+
+### What is the ga/gp/gs worker address convention?
+
+Every Go worker hatch has a three-part address:
+
+```
+gx{supervisor} : ga{template} gp{parent} gs{step}
+
+ga  =  allocation template (memory + cycle budget)
+gp  =  group parent (who spawned this worker)
+gs  =  group step (sequence within parent group)
+
+gx1:gak16gp1gs1   →  supervisor 1, 16KB arena, parent group 1, step 1
+gx1:gab128gp1gs2  →  supervisor 1, 128B probe, parent group 1, step 2
+gx2:gak32gp1gs1   →  supervisor 2, 32KB arena, parent group 1, step 1
+```
+
+When a parent group is reaped, gxN automatically walks the `gp` tree and reaps all `gs` children.
+
+---
+
+### What are all the ga template tiers?
+
+The name IS the spec — `gak16` = 16KB, `gab64` = 64 bytes. Zero ambiguity.
+
+| Tier | Prefix | Range | Use Case |
+|------|--------|-------|----------|
+| Byte | `gab` | 1B – 512B | Watchdog pings, signals, healthchecks. Leaf only — cannot spawn children. |
+| Kilobyte | `gak` | 4KB – 128KB | Normal workers. `gak16` is the sweet spot for 90% of use cases. |
+| Megabyte | `gam` | 1MB – 128MB | ⚠️ Think first. Ask: can I chunk into gak workers instead? |
+| Nested Rust | `gag` | 1–16 slots | Not memory — Go hatch calling back into Rust for CPU-heavy work. |
+
+> **Rule:** Large data (files, crypto, parsing) → Rust native `std::fs`. Go hatches stay lean. `gak` is the real home of gxgr.
+
+---
+
+### What is the gag tier — is it actually gigabytes?
+
+No. `gag` is a **nested Rust execution context** called from inside a Go hatch — not a memory size.
+
+```
+normal flow:
+gxr → gx1 → Go hatch → work → done
+
+gag nested flow:
+gxr → gx1 → Go hatch → gag::call_rust() → Rust computes → Go continues → done
+```
+
+When a Go hatch needs heavy CPU work mid-flight (crypto, compression, parsing), it calls `gag::call_rust()` — Rust handles the CPU-heavy bit and returns the result to Go. Max nesting depth: **2 levels.**
+
+---
+
+### How many unsafe blocks does gxgr have?
+
+**2 unsafe blocks. Total. Ever.** Both in bridge files. Never in user code.
+
+```rust
+// bridge_out.rs — unsafe #1 — Rust calls Go
+unsafe extern "C" {
+    fn gx_go_hatch(ptr: *mut u8, size: usize, fn_id: u64) -> i32;
+}
+
+// bridge_in.rs — unsafe #2 — Go calls back Rust (gag)
+#[no_mangle]
+pub unsafe extern "C" fn gx_rust_call(slots: u8, fn_id: u64) -> *mut u8 {
+    execute_rust_slot(slots, fn_id)
+}
+```
+
+Both are auditable in 5 minutes. Compare to Tokio's ~150 unsafe blocks scattered across wakers, vtables, UnsafeCells, and task queues.
+
+---
+
+### Why does Tokio need so many unsafe blocks?
+
+Rust's async model requires unsafe by design at the runtime level:
+
+| Component | Why unsafe is required |
+|-----------|----------------------|
+| Waker vtable | Raw function pointers — no safe abstraction exists |
+| Task scheduling | Intrusive linked lists, raw pointer manipulation |
+| Pin/Future polling | `Pin::new_unchecked` throughout async state machines |
+| UnsafeCell task state | Shared mutable state in a scheduler — unavoidable |
+| epoll/io_uring | Raw file descriptors — kernel interface |
+
+Tokio is brilliant engineering and its unsafe is careful and justified. The problem is you are reimplementing in unsafe Rust what Go already solved safely in its own runtime since 2009. gxgr sidesteps the problem entirely by **never implementing a Rust async runtime at all.**
+
+---
+
+### Can a Go panic escape the hatch and crash the Rust process?
+
+No. Every hatch wraps execution in `defer/recover`. Panics are caught at the boundary, the arena is reclaimed, and gxN marks the node as `Panicked`. The Rust supervisor never sees the panic.
+
+```go
+func Hatch(arenaPtr uintptr, arenaSize int, fn func(*Arena)) {
+    arena := newArena(arenaPtr, arenaSize)
+    defer func() {
+        if r := recover(); r != nil {
+            SignalPanic(r)  // caught — never escapes to Rust
+        }
+    }()
+    fn(arena)
+    SignalDone()
+}
+```
+
+---
+
+### gxgr vs Tokio vs Smol — when to choose what?
+
+| | Tokio | Smol | gxgr |
+|---|---|---|---|
+| Unsafe total | ~150 | ~60 | **2** |
+| Concurrency model | Rust Futures/Wakers | Rust Futures | Go goroutines |
+| Supervision tree | external crate | external crate | **built-in gxo** |
+| Budget enforcement | none | none | **ga templates** |
+| Multi-supervisor | one runtime | one runtime | **gx1..gxN independent** |
+| Maturity | production (2019) | production (2020) | concept (2026) |
+
+**Choose Tokio** — pure Rust shop, already in Tokio ecosystem, proven production needs.
+
+**Choose Smol** — lightweight pure Rust async, minimal overhead.
+
+**Choose gxgr** — zero unsafe is a hard requirement, need built-in supervision trees, systems-level work, team knows Go.
+
+---
+
+### Why zig cc? Why not gcc or clang?
+
+| Property | gcc/clang | zig cc |
+|----------|-----------|--------|
+| musl static targeting | Complex setup | Built-in, trivial |
+| Cross-compilation | Separate toolchain per target | One install, all targets |
+| Dev = Prod | Dev uses glibc, prod uses musl | musl everywhere, identical |
+| Install | Package manager required | Single static binary download |
+
+zig cc is used in **both dev and release** — not just at deploy time. Dev environment is identical to production. No "works on my machine" surprises. zig itself is a single static binary — even your build tool has no external dependencies.
+
+---
+
+### How do two languages compile into one binary?
+
+```bash
+# Step 1 — Go compiles to C-compatible static archive
+CGO_ENABLED=1 go build -buildmode=c-archive -o target/gx.a ./gx/...
+
+# Step 2 — Rust compiles and links Go archive
+RUSTFLAGS="-L target/ -l static=gx" \
+cargo build --target x86_64-unknown-linux-musl --release
+
+# Result
+$ ldd myapp
+not a dynamic executable  ← zero external dependencies
+```
+
+The final binary contains: Rust code + Go runtime + Go hatches + musl libc + CGo bridge. ~8–15MB stripped. Runs on bare metal, scratch containers, embedded Linux.
