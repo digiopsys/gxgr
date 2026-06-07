@@ -1,91 +1,111 @@
-# gxgr — The Go-Rust Framework
-### Complete Architecture & Design Specification v0.2
+<p align="center">
+  <img src="https://img.shields.io/badge/version-v0.1--concept-orange?style=flat-square&labelColor=0d1117" />
+  <img src="https://img.shields.io/badge/unsafe_blocks-2_total-00d4aa?style=flat-square&labelColor=0d1117" />
+  <img src="https://img.shields.io/badge/binary-static_musl-a78bfa?style=flat-square&labelColor=0d1117" />
+  <img src="https://img.shields.io/badge/toolchain-zig_cc-fbbf24?style=flat-square&labelColor=0d1117" />
+  <img src="https://img.shields.io/badge/status-design_concept-38bdf8?style=flat-square&labelColor=0d1117" />
+</p>
 
-> **gxgr** is a hybrid systems framework that harnesses Go's concurrency strengths  
-> inside a Rust-owned, memory-safe supervision model.  
-> **2 unsafe blocks total. Static binary via musl+zig. Systemd-grade reliability.**
+<h1 align="center">gxgr</h1>
+<p align="center"><b>The Go-Rust Framework</b></p>
+<p align="center">
+  Harness Go's concurrency inside Rust-owned, memory-safe supervision.<br/>
+  <b>2 unsafe blocks total. Static binary via musl + zig. Systemd-grade reliability.</b>
+</p>
 
 ---
 
-## 1. Why gxgr Exists
+## Why gxgr Exists
 
-Modern systems software in pure Rust hits the same wall every time: async concurrency requires implementing Wakers, Pin, task vtables, intrusive linked lists — all requiring `unsafe`. Tokio alone has **~100-200 unsafe blocks** scattered across its source. The Tokio team even added `#![allow(unsafe_op_in_unsafe_fn)]` just to manage the noise.
+Modern systems software in pure Rust hits the same wall every time: async concurrency requires implementing Wakers, Pin, task vtables, intrusive linked lists — all requiring `unsafe`. Tokio alone has **~150 unsafe blocks** scattered across its source. The Tokio team even added `#![allow(unsafe_op_in_unsafe_fn)]` just to manage the noise.
 
-gxgr's thesis:
+**gxgr's thesis:**
 
 > Don't make Rust do what Go already solved in 2009.  
 > Don't let Go own what Rust should own.  
 > Define a clean enforced contract between them.  
-> 2 unsafe blocks. Both in one file. Both auditable in 5 minutes.
+> **2 unsafe blocks. Both in bridge files. Both auditable in 5 minutes.**
 
 ---
 
-## 2. Naming & Module Structure
+## Naming & Module Structure
 
 ```
-gxgr          →  the framework name (Go-Rust)
-gr            →  the umbrella pathway concept
-crates.io:    gxgr          (search "gx" finds it)
-go mod:       gx-modname    (search "gx-" finds all modules)
+gxgr          →  framework name (Go-Rust)
+gr            →  umbrella pathway concept
+
+crates.io:    gxgr           (search "gx" finds it)
+go mod:       xg-modname     (search "xg-" finds all Go side modules)
 ```
 
-### Module files
+### The gx / xg split
 
 ```
-gxo.rs    →  📋 Object registry (pure static, compile-time only)
-              templates, gxN registration, rules
-              zero runtime, zero allocation, zero process
-              compiles as read-only const data into binary
+gx  =  Rust side   (Go eXecution supervisor)
+xg  =  Go side     (eXecution Go hatch)
 
-gxr.rs    →  🎛️ Runner/enforcer (ephemeral coordinator)
-              gxr start / stop / restart / status
-              reads gxo, coordinates gxN
-              boots briefly, steps back — not a daemon
+mirror of each other — one owns, one runs
+```
 
-gx1.rs    →  ✋ Supervisor instance 1 (independent hand)
-gx2.rs    →  ✋ Supervisor instance 2 (independent hand)
-gxN.rs    →  ✋ Supervisor instance N (as many as needed)
+### File layout
+
+```
+gxgr/
+├── gxo.rs       →  📋 Registry — templates, rules, gxN definitions
+│                   pure static Rust const — zero runtime, zero process
+│                   compiles as read-only data into the binary
+│
+├── gxr.rs       →  🎛️ Runner — ephemeral coordinator
+│                   gxr start / stop / restart / status
+│                   boots briefly, steps back — not a daemon
+│
+├── gx1.rs       →  ✋ Rust supervisor 1 (independent hand)
+├── xg1.go       →  🐹 Go hatch 1       (paired with gx1)
+│
+├── gx2.rs       →  ✋ Rust supervisor 2
+├── xg2.go       →  🐹 Go hatch 2
+│
+└── bridge/
+    ├── bridge_out.rs   →  unsafe #1 — Rust → Go
+    └── bridge_in.rs    →  unsafe #2 — Go → Rust (gag)
 ```
 
 ### Why no singleton
 
 ```
-old gaps0 singleton:
-→ one crash = everything down
-→ one bottleneck for all allocation
+traditional singleton:
+→ one crash  = everything down
+→ one allocator = bottleneck
 → monolithic, hard to scale
 
 gxgr model:
-→ gxo = constitution (can't crash, it's just data)
-→ gxr = ephemeral coordinator (starts, steps back)
-→ gxN = independent hands (each owns its own world)
+→ gxo  = constitution (can't crash — it's just data)
+→ gxr  = ephemeral coordinator (starts, steps back)
+→ gxN  = independent hands (each owns its own world)
 → gx1 crashes? gx2 and gx3 keep running
 → gxr restarts gx1 from gxo definition
 ```
 
 ---
 
-## 3. ga — Allocation Template System
+## ga — Allocation Template System
 
-Every Go worker hatch is given a **ga template** — a predefined contract
-defining exactly how much memory and how many goroutines it may use.
-**Workers never allocate. They request a template from gxo.**
+Every Go worker hatch is given a **ga template** — a predefined contract defining exactly how much memory and how many goroutines it may use. **Workers never allocate themselves. They request a template from gxo.**
 
-### 3.1 Naming Convention
+### Naming Rule
 
 ```
 ga + unit prefix + size = the template name
 the name IS the spec — zero ambiguity
 
-gab   →  bytes
-gak   →  kilobytes
-gam   →  megabytes
-gag   →  gigabytes / nested Rust call context
+gab  →  bytes
+gak  →  kilobytes
+gam  →  megabytes
+gag  →  nested Rust execution context (not memory)
 ```
 
-### 3.2 Complete Template Range
+### Byte tier — `gab`
 
-#### Byte tier (sub-KB)
 | Template | Arena | Goroutines | Channels | Use Case |
 |----------|-------|------------|----------|----------|
 | `gab1` | 1B | 1 | 1 | single flag / WATCHDOG=1 ping |
@@ -95,17 +115,21 @@ gag   →  gigabytes / nested Rust call context
 | `gab256` | 256B | 1 | 1 | event with metadata |
 | `gab512` | 512B | 2 | 1 | small message payload |
 
-#### Kilobyte tier (standard workers)
+> `gab` = leaf only. `can_spawn = false`. Too tiny to be parents. Highest priority.
+
+### Kilobyte tier — `gak` ⭐ sweet spot
+
 | Template | Arena | Goroutines | Channels | Use Case |
 |----------|-------|------------|----------|----------|
 | `gak4` | 4KB | 2 | 1 | minimal worker |
 | `gak8` | 8KB | 4 | 2 | lightweight worker |
-| `gak16` | 16KB | 8 | 4 | standard worker (sweet spot) |
+| `gak16` | 16KB | 8 | 4 | **standard worker — 90% of use cases** |
 | `gak32` | 32KB | 16 | 8 | heavy worker |
 | `gak64` | 64KB | 32 | 16 | data pipeline |
 | `gak128` | 128KB | 64 | 32 | large workload |
 
-#### Megabyte tier (think first)
+### Megabyte tier — `gam` ⚠️
+
 | Template | Arena | Goroutines | Channels | Use Case |
 |----------|-------|------------|----------|----------|
 | `gam1` | 1MB | 32 | 16 | large file chunk processing |
@@ -113,64 +137,39 @@ gag   →  gigabytes / nested Rust call context
 | `gam10` | 10MB | 64 | 32 | ⚠️ think twice — chunk instead |
 | `gam128` | 128MB | 128 | 64 | 🚨 reconsider architecture |
 
-#### Gigabyte tier (special)
-| Template | Arena | Use Case |
+### gag tier — nested Rust context
+
+| Template | Slots | Use Case |
 |----------|-------|----------|
-| `gag1` | nested Rust | Go hatch calls back into Rust |
-| `gag4` | nested Rust (4 slots) | Go hatch with 4 parallel Rust calls |
-| `gag16` | nested Rust (16 slots) | heavy nested computation |
+| `gag1` | 1 | Go hatch calls back into Rust |
+| `gag4` | 4 | 4 parallel Rust callbacks from Go |
+| `gag16` | 16 | heavy nested computation |
 
-> `gag` is NOT a memory size — it's a **nested Rust execution context**  
-> called FROM inside a Go hatch, back into Rust.  
-> See section 6 for details.
+> `gag` is **NOT a memory size** — it is a nested Rust execution context called FROM inside a Go hatch, back into Rust. See [Nested Rust Calls](#nested-rust-calls--gag) below.
 
-### 3.3 Rule: sub-KB = leaf only
+### Rule: large data stays in Rust
 
 ```
-gab tier:
-→ can_spawn = false  (leaf nodes, never parents)
-→ do one thing, signal done, exit
-→ too tiny to supervise children
-
-gak and above:
-→ can_spawn = true   (can be gp parents)
-→ standard worker hierarchy
+Rust native (std::fs, memmap2, serde):    Go hatch (via ga arena):
+→ file I/O          ✅                    → concurrent I/O    ✅
+→ large reads       ✅                    → network handling  ✅
+→ CPU computation   ✅                    → goroutine fan-out ✅
+→ cryptography      ✅                    → channel pipelines ✅
+→ parsing           ✅                    → event loops       ✅
 ```
 
-### 3.4 Rule: large data stays in Rust
-
-```
-Rust native (std::fs, memmap2, serde):
-→ file I/O          ✅
-→ large reads       ✅
-→ CPU computation   ✅
-→ cryptography      ✅
-→ parsing           ✅
-→ data structures   ✅
-
-Go hatch (via ga arena):
-→ concurrent I/O    ✅
-→ network handling  ✅
-→ event loops       ✅
-→ goroutine fan-out ✅
-→ channel pipelines ✅
-
-gam/gag tier:
-→ edge cases only
-→ if you need MB arenas, chunk into gak workers first
-→ Rust native memory is right there 👉
-```
+> Large data → Rust native. Go hatches stay lean. `gak` is the real home of gxgr.
 
 ---
 
-## 4. Worker Address Convention
+## Worker Address Convention
 
 Every Go worker hatch has a three-part address:
 
 ```
 gx{supervisor} : ga{template} gp{parent} gs{step}
 
-gx  =  which gxN supervisor owns this worker
+gx  =  which supervisor owns this worker
 ga  =  allocation template (memory + cycle budget)
 gp  =  group parent (who spawned this worker)
 gs  =  group step (sequence within parent group)
@@ -181,8 +180,8 @@ gs  =  group step (sequence within parent group)
 ```
 gx1:gak16gp1gs1   →  supervisor 1, 16KB arena, parent 1, step 1
 gx1:gak16gp1gs2   →  supervisor 1, 16KB arena, parent 1, step 2
-gx1:gak8gp2gs1    →  supervisor 1, 8KB arena,  child of gp1, step 1
-gx2:gak32gp1gs1   →  supervisor 2, 32KB arena, parent 1, step 1
+gx1:gak8gp2gs1    →  supervisor 1, 8KB,  child of gp1, step 1
+gx2:gab128gp1gs1  →  supervisor 2, 128B probe, parent 1, step 1
 ```
 
 ### Hierarchy example
@@ -204,9 +203,9 @@ gxr
 
 ---
 
-## 5. Memory Model — Pinned Arena Protocol
+## Memory Model — Pinned Arena Protocol
 
-> **Go never owns memory. gxo/gxN owns everything.**
+> **Go never owns memory. gxN owns everything.**
 
 ```
 1. gxN allocates pinned arena from its pool (Rust)
@@ -242,120 +241,62 @@ gxN pool:  [ FREE ][ FREE ][ FREE ][ FREE ]
 
 ---
 
-## 6. Nested Rust Calls — gag tier
+## Nested Rust Calls — gag
 
-`gag` templates enable a Go hatch to **call back into Rust** for
-CPU-heavy work without blocking the goroutine scheduler.
+`gag` enables a Go hatch to **call back into Rust** for CPU-heavy work without blocking the goroutine scheduler.
 
 ```
-normal flow (gak):
+normal flow:
 gxr → gx1 → Go hatch → work → done
 
-nested flow (gag):
-gxr → gx1 → Go hatch → gag::call_rust() → Rust computes → returns to Go → done
+gag nested flow:
+gxr → gx1 → Go hatch → gag::call_rust() → Rust computes → Go continues → done
 ```
 
-### When to use gag
-
-```
-Go hatch doing concurrent network work (gak16)
-needs heavy CPU computation mid-flight:
-→ crypto, parsing, compression
-→ don't block the goroutine
-→ don't do CPU work in Go (Go loses here)
-→ gag::call_rust() → fast Rust computation
-→ result returned to Go hatch
-→ Go continues concurrent work
+```go
+// xg1.go — calling back into Rust mid-hatch
+result := gx.CallRust(gag4, func() []byte {
+    return rustCrypto(data)  // heavy crypto in Rust, not blocking Go
+})
 ```
 
-### Nesting depth limit
-
-```
-gxr (Rust)
- └── gak (Go hatch)        level 1
-       └── gag (Rust call) level 2 ← MAX
-
-beyond level 2:
-→ rejected by gxr at runtime
-→ "rethink your architecture" 😄
-```
+> Max nesting depth: **2 levels.** Beyond that gxr rejects it at runtime.
 
 ---
 
-## 7. gxo.rs — The Registry
+## gxo.rs — The Registry
 
 Pure static Rust. Zero runtime. Zero process. Compiles as read-only const data.
 
 ```rust
-// gxo.rs — complete ga template registry
+// gxo.rs — ga template registry (excerpt)
 
-// ── byte tier ─────────────────────────────
+// byte tier
 pub const GAB1:   GaTemplate = GaTemplate { name:"gab1",   arena:1,       goroutines:1,  channels:1,  can_spawn:false, priority:255 };
-pub const GAB4:   GaTemplate = GaTemplate { name:"gab4",   arena:4,       goroutines:1,  channels:1,  can_spawn:false, priority:254 };
 pub const GAB64:  GaTemplate = GaTemplate { name:"gab64",  arena:64,      goroutines:1,  channels:1,  can_spawn:false, priority:253 };
 pub const GAB128: GaTemplate = GaTemplate { name:"gab128", arena:128,     goroutines:1,  channels:1,  can_spawn:false, priority:252 };
-pub const GAB256: GaTemplate = GaTemplate { name:"gab256", arena:256,     goroutines:1,  channels:1,  can_spawn:false, priority:251 };
-pub const GAB512: GaTemplate = GaTemplate { name:"gab512", arena:512,     goroutines:2,  channels:1,  can_spawn:false, priority:250 };
 
-// ── KB tier ───────────────────────────────
-pub const GAK4:   GaTemplate = GaTemplate { name:"gak4",   arena:4_096,   goroutines:2,  channels:1,  can_spawn:false, priority:200 };
+// KB tier
 pub const GAK8:   GaTemplate = GaTemplate { name:"gak8",   arena:8_192,   goroutines:4,  channels:2,  can_spawn:true,  priority:180 };
 pub const GAK16:  GaTemplate = GaTemplate { name:"gak16",  arena:16_384,  goroutines:8,  channels:4,  can_spawn:true,  priority:160 };
 pub const GAK32:  GaTemplate = GaTemplate { name:"gak32",  arena:32_768,  goroutines:16, channels:8,  can_spawn:true,  priority:140 };
-pub const GAK64:  GaTemplate = GaTemplate { name:"gak64",  arena:65_536,  goroutines:32, channels:16, can_spawn:true,  priority:120 };
-pub const GAK128: GaTemplate = GaTemplate { name:"gak128", arena:131_072, goroutines:64, channels:32, can_spawn:true,  priority:100 };
 
-// ── MB tier ───────────────────────────────
-pub const GAM1:   GaTemplate = GaTemplate { name:"gam1",   arena:1_048_576,   goroutines:32,  channels:16, can_spawn:true, priority:80 };
-pub const GAM4:   GaTemplate = GaTemplate { name:"gam4",   arena:4_194_304,   goroutines:64,  channels:32, can_spawn:true, priority:60 };
-pub const GAM10:  GaTemplate = GaTemplate { name:"gam10",  arena:10_485_760,  goroutines:64,  channels:32, can_spawn:true, priority:40 };
-pub const GAM128: GaTemplate = GaTemplate { name:"gam128", arena:134_217_728, goroutines:128, channels:64, can_spawn:true, priority:20 };
-
-// ── gag tier (nested Rust) ────────────────
+// gag tier (nested Rust — not memory)
 pub const GAG1:   GaTemplate = GaTemplate { name:"gag1",  kind:Nested, rust_slots:1,  priority:160 };
 pub const GAG4:   GaTemplate = GaTemplate { name:"gag4",  kind:Nested, rust_slots:4,  priority:140 };
-pub const GAG16:  GaTemplate = GaTemplate { name:"gag16", kind:Nested, rust_slots:16, priority:120 };
 
-// ── gxN supervisor registry ───────────────
+// gxN supervisor registry
 pub const GX_REGISTRY: &[GxEntry] = &[
     GxEntry { id:1, role:"network",  file:"gx1", state:Off },
     GxEntry { id:2, role:"io",       file:"gx2", state:Off },
-    GxEntry { id:3, role:"database", file:"gx3", state:Off },
 ];
-
-// ── orchestration rules ───────────────────
-pub const GX_RULES: GxRules = GxRules {
-    start_all_on_boot:  false,
-    stop_all_on_panic:  true,
-    restart_on_fault:   true,
-    max_restarts:       3,
-    gag_max_depth:      2,
-};
 ```
 
 ---
 
-## 8. gxr.rs — The Runner
+## gxr.rs — The Runner
 
 Ephemeral coordinator. Reads gxo. Coordinates gxN. Steps back.
-
-```rust
-// gxr.rs — ephemeral runner
-
-fn main() {
-    match gxr::command() {
-        Start(id)   => gxr::start(id),
-        Stop(id)    => gxr::stop(id),
-        Restart(id) => gxr::restart(id),
-        StartAll    => gxr::start_all(),
-        StopAll     => gxr::stop_all(),
-        Status      => gxr::status(),
-    }
-    // done — exits cleanly
-}
-```
-
-### CLI usage
 
 ```bash
 gxr start gx1         # start one supervisor
@@ -369,31 +310,28 @@ gxr status            # show all gxN states + worker counts
 
 ---
 
-## 9. Go Module — gx-modname
+## Go Side — xg
+
+The Go hatch runtime lives in `xg` files, paired with their `gx` Rust supervisor:
 
 ```
-gx-modname/
-├── gx/
-│   ├── hatch.go      — worker hatch entrypoint
-│   ├── arena.go      — arena-bounded memory ops
-│   ├── channel.go    — channel mgmt within budget
-│   ├── signal.go     — done/panic signaling to Rust
-│   ├── recover.go    — panic recovery at boundary
-│   └── nested.go     — gag nested Rust call bridge
-└── go.mod            → module github.com/org/myapp-gx
+gx1.rs  ←paired with→  xg1.go
+gx2.rs  ←paired with→  xg2.go
 ```
 
 ### Hatch entrypoint
 
 ```go
-// gx/hatch.go
+// xg1.go — Go hatch entrypoint
+
+package xg
 
 func Hatch(arenaPtr uintptr, arenaSize int, fn func(*Arena)) {
     arena := newArena(arenaPtr, arenaSize)
 
     defer func() {
         if r := recover(); r != nil {
-            SignalPanic(r)  // caught at boundary, never escapes
+            SignalPanic(r)  // caught at boundary — never escapes to Rust
         }
     }()
 
@@ -407,65 +345,32 @@ func Hatch(arenaPtr uintptr, arenaSize int, fn func(*Arena)) {
 ```go
 // user code
 
-gaps.Hatch(func(arena *gx.Arena) {
-    ch := arena.NewChannel(4)     // within gak16 budget
+xg.Hatch(func(arena *xg.Arena) {
+    ch := arena.NewChannel(4)            // within gak16 budget
 
-    go func() { ch <- fetchData() }()  // goroutine within budget
+    go func() { ch <- fetchData() }()   // goroutine within budget
     go func() { ch <- fetchMeta() }()
 
     result := <-ch
     meta   := <-ch
 
-    arena.Write(result, meta)     // write to pinned arena
-    // SignalDone called automatically
-})
-```
-
-### Nested Rust call (gag)
-
-```go
-// gx/nested.go — calling back into Rust from Go
-
-func CallRust(slots int, fn func() []byte) []byte {
-    // signals Rust to execute fn in Rust land
-    // blocks goroutine until Rust returns
-    // result copied into arena
-    return gx_rust_call(slots, fn)
-}
-
-// usage in a hatch:
-result := gx.CallRust(gag4, func() []byte {
-    return rustCrypto(data)  // heavy crypto in Rust
+    arena.Write(result, meta)
+    // SignalDone called automatically on return
 })
 ```
 
 ---
 
-## 10. Rust Crate — gxgr
+## The 2 Unsafe Blocks
 
-```
-gxgr/
-├── src/
-│   ├── lib.rs          — public API
-│   ├── gxo.rs          — registry (templates, rules)
-│   ├── gxr.rs          — runner (start/stop/status)
-│   ├── node.rs         — GapNode supervision tree
-│   ├── arena.rs        — pinned arena pool
-│   ├── reaper.rs       — timeout + budget enforcement
-│   ├── bridge_out.rs   — Rust→Go (unsafe #1)
-│   └── bridge_in.rs    — Go→Rust gag (unsafe #2)
-├── Cargo.toml
-└── build.rs
-```
-
-### The 2 unsafe blocks — total
+**This is the entire unsafe surface of gxgr. Both in bridge files. Never in user code.**
 
 ```rust
-// bridge_out.rs — unsafe #1 — Rust calls Go hatch
-// THIS IS UNSAFE BLOCK 1 OF 2 IN THE ENTIRE FRAMEWORK
+// bridge/bridge_out.rs — unsafe #1 — Rust calls Go
+// THIS IS UNSAFE BLOCK 1 OF 2
 
 unsafe extern "C" {
-    fn gx_go_hatch(arena_ptr: *mut u8, arena_size: usize, fn_id: u64) -> i32;
+    fn gx_go_hatch(ptr: *mut u8, size: usize, fn_id: u64) -> i32;
 }
 
 pub(crate) unsafe fn call_hatch(ptr: *mut u8, size: usize, fn_id: u64) -> i32 {
@@ -474,33 +379,32 @@ pub(crate) unsafe fn call_hatch(ptr: *mut u8, size: usize, fn_id: u64) -> i32 {
 ```
 
 ```rust
-// bridge_in.rs — unsafe #2 — Go calls back into Rust (gag)
-// THIS IS UNSAFE BLOCK 2 OF 2 IN THE ENTIRE FRAMEWORK
+// bridge/bridge_in.rs — unsafe #2 — Go calls back Rust (gag)
+// THIS IS UNSAFE BLOCK 2 OF 2
 
 #[no_mangle]
 pub unsafe extern "C" fn gx_rust_call(slots: u8, fn_id: u64) -> *mut u8 {
-    // execute the registered Rust fn
-    // return result pointer to Go
     execute_rust_slot(slots, fn_id)
 }
 ```
 
-```
-Tokio:   ~100-200 unsafe blocks, scattered everywhere
-gxgr:    2 unsafe blocks, both in bridge files, auditable in 5 min 🎯
-```
+| | Tokio | Smol | gxgr |
+|---|---|---|---|
+| unsafe blocks | ~150 | ~60 | **2** |
+| location | scattered everywhere | scattered | **one bridge file** |
+| in user code | some | some | **never** |
+| auditable in 5 min | ❌ | ❌ | **✅** |
 
 ---
 
-## 11. Toolchain — zig cc everywhere
+## Toolchain — zig cc everywhere
 
-gxgr uses **zig cc** as the C compiler for BOTH dev and release.
-This means dev and prod are identical — no glibc surprises at deploy time.
+zig cc is used as the C compiler for **both dev and release**. Dev = Prod. No surprises.
 
 ```bash
-# install zig (itself a single static binary — no package manager needed)
+# install zig — itself a single static binary
 wget https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz
-tar xf zig-*.tar.xz && export PATH=$PATH:~/zig-*
+tar xf zig-*.tar.xz && export PATH=$PATH:~/zig-linux-x86_64-0.13.0
 ```
 
 ### Makefile
@@ -511,68 +415,63 @@ GO_BASE = CGO_ENABLED=1 GOOS=linux GOARCH=amd64
 MUSL    = --target x86_64-unknown-linux-musl
 
 dev:
-	$(ZIG_CC) $(GO_BASE) go run ./gx/... &
+	$(ZIG_CC) $(GO_BASE) go run ./xg/... &
 	cargo run $(MUSL)
 
 release:
 	$(ZIG_CC) $(GO_BASE) \
-	go build -buildmode=c-archive -o target/gx.a ./gx/...
-	RUSTFLAGS="-L target/ -l static=gx" \
+	go build -buildmode=c-archive -o target/xg.a ./xg/...
+	RUSTFLAGS="-L target/ -l static=xg" \
 	cargo build $(MUSL) --release
 
 cross-arm:
 	CC="zig cc -target aarch64-linux-musl" \
 	$(GO_BASE) GOARCH=arm64 \
-	go build -buildmode=c-archive -o target/gx-arm.a ./gx/...
+	go build -buildmode=c-archive -o target/xg-arm.a ./xg/...
 
 test:
-	$(ZIG_CC) $(GO_BASE) go test ./gx/...
+	$(ZIG_CC) $(GO_BASE) go test ./xg/...
 	cargo test $(MUSL)
 ```
 
 ### Compile pipeline
 
 ```
-gx1.go + gx2.go
-    ↓ go build -buildmode=c-archive
-    gx.a  (Go static lib, C-compatible)
+xg1.go + xg2.go
+    ↓  go build -buildmode=c-archive
+    xg.a  (Go static lib + Go runtime baked in)
 
-gxo.rs + gxr.rs + gxN.rs
-    ↓ rustc --target musl
-    + links gx.a via CGo bridge
-    ↓ zig cc (musl C compiler)
-    ↓ static linker
-    myapp  ← single static binary 🎯
+gxo.rs + gxr.rs + gx1.rs + gx2.rs
+    ↓  rustc --target musl
+    links xg.a via bridge (zig cc as C compiler)
+    ↓  static linker (musl)
+    myapp  ← single static binary
 
 $ ldd myapp
-not a dynamic executable  ← zero external deps
+not a dynamic executable  ← zero external dependencies
 ```
 
 ### Binary contents
 
 ```
-myapp
-├── Rust code     (gxo, gxr, gx1, gx2...)
-├── Go runtime    (scheduler, GC, goroutine mgmt)
-├── Go hatches    (gx1.go, gx2.go...)
-├── musl libc     (static)
-└── CGo bridge    (the 2 handshake points)
-
-size: ~8-15MB stripped
-deps: none
-runs: anywhere Linux (bare metal, scratch container, embedded)
+myapp (~8–15MB stripped)
+├── Rust code      gxo + gxr + gx1 + gx2
+├── Go runtime     scheduler + GC + goroutine mgmt
+├── Go hatches     xg1.go + xg2.go
+├── musl libc      static — no glibc
+└── CGo bridge     2 unsafe handshakes
 ```
 
 ---
 
-## 12. Comparison
+## Comparison
 
 | | Tokio | Smol | gxgr |
 |---|---|---|---|
-| Language | Pure Rust | Pure Rust | Rust + Go |
-| Unsafe in user code | some | some | **zero** |
-| Unsafe total | ~100-200 | ~50-100 | **2** |
-| Async model | Rust Futures/Wakers | Rust Futures | Go goroutines |
+| Language | Pure Rust | Pure Rust | **Rust + Go** |
+| unsafe in user code | some | some | **zero** |
+| unsafe total | ~150 | ~60 | **2** |
+| Async model | Rust Futures/Wakers | Rust Futures | **Go goroutines** |
 | Scheduler | custom M:N Rust | custom M:N Rust | **Go's proven M:N** |
 | Supervision tree | external crate | external crate | **built-in gxo** |
 | Budget enforcement | none | none | **ga templates** |
@@ -581,12 +480,12 @@ runs: anywhere Linux (bare metal, scratch container, embedded)
 | Panic containment | per-task | per-task | **hatch boundary** |
 | Nested Rust calls | N/A | N/A | **gag tier** |
 | Static binary | yes (musl) | yes (musl) | **yes (musl+zig)** |
-| Dev = Prod toolchain | no | no | **yes (zig cc both)** |
+| Dev = Prod toolchain | ❌ | ❌ | **✅ zig cc both** |
 | Cross-compile | complex | complex | **zig cc trivial** |
 
 ---
 
-## 13. ga Template Quick Reference
+## ga Quick Reference
 
 ```
 gab1    1B      watchdog ping, single flag
@@ -595,19 +494,19 @@ gab64   64B     small probe
 gab128  128B    healthcheck
 gab256  256B    event watcher
 gab512  512B    status reporter
-─────────────────────────────────
+─────────────────────────────────────────
 gak4    4KB     minimal worker
 gak8    8KB     lightweight worker
-gak16   16KB    standard worker ← sweet spot
+gak16   16KB    standard worker  ← sweet spot ⭐
 gak32   32KB    heavy worker
 gak64   64KB    data pipeline
 gak128  128KB   large workload
-─────────────────────────────────
-gam1    1MB     large file chunk  ⚠️ think first
-gam4    4MB     heavy streaming   ⚠️ think first
-gam10   10MB    🚨 chunk instead
-gam128  128MB   💀 reconsider
-─────────────────────────────────
+─────────────────────────────────────────
+gam1    1MB     large file chunk    ⚠️  think first
+gam4    4MB     heavy streaming     ⚠️  think first
+gam10   10MB                        🚨  chunk instead
+gam128  128MB                       💀  reconsider
+─────────────────────────────────────────
 gag1    nested  Go→Rust callback (1 slot)
 gag4    nested  Go→Rust callback (4 slots)
 gag16   nested  Go→Rust callback (16 slots)
@@ -615,22 +514,40 @@ gag16   nested  Go→Rust callback (16 slots)
 
 ---
 
-## 14. Publishing
+## Roadmap
+
+| Phase | Milestone | Status |
+|-------|-----------|--------|
+| v0.1 | gxo registry, ga templates (all tiers), gxN struct | 🔵 design |
+| v0.2 | xg Go hatch entrypoint, bridge_out, SignalDone/Panic | ⬜ pending |
+| v0.3 | Supervision tree, reaper, timeout enforcement | ⬜ pending |
+| v0.4 | gp/gs hierarchy, child reaping on parent death | ⬜ pending |
+| v0.5 | gag nested Rust calls, bridge_in, depth limit | ⬜ pending |
+| v0.6 | gxr CLI (start/stop/restart/status) | ⬜ pending |
+| v0.7 | zig cc build pipeline, musl static binary | ⬜ pending |
+| v0.8 | cycle budget enforcement | ⬜ pending |
+| v0.9 | cross-compilation (arm64, riscv64) | ⬜ pending |
+| v1.0 | stable API → crates.io/gxgr + go mod xg-\* | ⬜ pending |
+
+---
+
+## Publishing
 
 ```
 crates.io:    gxgr
-go mod:       github.com/org/gx-myapp
+go mod:       github.com/org/xg-myapp
 docs:         docs.rs/gxgr
 
 community naming convention:
-→ any Go module for gxgr framework: prefix with gx-
-→ gx-network, gx-io, gx-db, gx-yourproject
-→ search "gx-" on pkg.go.dev finds them all
+→ Rust crates  prefix with gx-   →  gx-network, gx-io, gx-db
+→ Go modules   prefix with xg-   →  xg-network, xg-io, xg-db
+→ search "gx-" on crates.io   → finds all Rust side crates
+→ search "xg-" on pkg.go.dev  → finds all Go side modules
 ```
 
-# gxgr — Q&A
-
 ---
+
+## Q&A
 
 ### Why use gxgr if I just want async? Why not just use Go?
 
@@ -676,16 +593,27 @@ No singleton. `gx1` can crash without affecting `gx2` or `gx3`. `gxo` is immorta
 
 ---
 
-### What is the ga/gp/gs worker address convention?
+### What is the gx / xg split?
 
-Every Go worker hatch has a three-part address:
+```
+gx  =  Rust side   — supervisors, memory owners
+xg  =  Go side     — hatches, concurrent workers
+
+gx1.rs  ←paired with→  xg1.go
+gx2.rs  ←paired with→  xg2.go
+
+see gx = Rust owns it
+see xg = Go runs it
+```
+
+They rhyme, they mirror, they're unambiguous. `gxgr` on crates.io, `xg-*` on pkg.go.dev.
+
+---
+
+### What is the ga/gp/gs worker address convention?
 
 ```
 gx{supervisor} : ga{template} gp{parent} gs{step}
-
-ga  =  allocation template (memory + cycle budget)
-gp  =  group parent (who spawned this worker)
-gs  =  group step (sequence within parent group)
 
 gx1:gak16gp1gs1   →  supervisor 1, 16KB arena, parent group 1, step 1
 gx1:gab128gp1gs2  →  supervisor 1, 128B probe, parent group 1, step 2
@@ -696,31 +624,13 @@ When a parent group is reaped, gxN automatically walks the `gp` tree and reaps a
 
 ---
 
-### What are all the ga template tiers?
-
-The name IS the spec — `gak16` = 16KB, `gab64` = 64 bytes. Zero ambiguity.
-
-| Tier | Prefix | Range | Use Case |
-|------|--------|-------|----------|
-| Byte | `gab` | 1B – 512B | Watchdog pings, signals, healthchecks. Leaf only — cannot spawn children. |
-| Kilobyte | `gak` | 4KB – 128KB | Normal workers. `gak16` is the sweet spot for 90% of use cases. |
-| Megabyte | `gam` | 1MB – 128MB | ⚠️ Think first. Ask: can I chunk into gak workers instead? |
-| Nested Rust | `gag` | 1–16 slots | Not memory — Go hatch calling back into Rust for CPU-heavy work. |
-
-> **Rule:** Large data (files, crypto, parsing) → Rust native `std::fs`. Go hatches stay lean. `gak` is the real home of gxgr.
-
----
-
 ### What is the gag tier — is it actually gigabytes?
 
 No. `gag` is a **nested Rust execution context** called from inside a Go hatch — not a memory size.
 
 ```
-normal flow:
-gxr → gx1 → Go hatch → work → done
-
-gag nested flow:
-gxr → gx1 → Go hatch → gag::call_rust() → Rust computes → Go continues → done
+normal:  gxr → gx1 → Go hatch → work → done
+gag:     gxr → gx1 → Go hatch → gag::call_rust() → Rust computes → Go continues → done
 ```
 
 When a Go hatch needs heavy CPU work mid-flight (crypto, compression, parsing), it calls `gag::call_rust()` — Rust handles the CPU-heavy bit and returns the result to Go. Max nesting depth: **2 levels.**
@@ -729,89 +639,35 @@ When a Go hatch needs heavy CPU work mid-flight (crypto, compression, parsing), 
 
 ### How many unsafe blocks does gxgr have?
 
-**2 unsafe blocks. Total. Ever.** Both in bridge files. Never in user code.
+**2 unsafe blocks. Total. Ever.** Both in `bridge/`. Never in user code. Both auditable in 5 minutes.
 
-```rust
-// bridge_out.rs — unsafe #1 — Rust calls Go
-unsafe extern "C" {
-    fn gx_go_hatch(ptr: *mut u8, size: usize, fn_id: u64) -> i32;
-}
-
-// bridge_in.rs — unsafe #2 — Go calls back Rust (gag)
-#[no_mangle]
-pub unsafe extern "C" fn gx_rust_call(slots: u8, fn_id: u64) -> *mut u8 {
-    execute_rust_slot(slots, fn_id)
-}
-```
-
-Both are auditable in 5 minutes. Compare to Tokio's ~150 unsafe blocks scattered across wakers, vtables, UnsafeCells, and task queues.
+Compare: Tokio ~150, Smol ~60, gxgr **2**.
 
 ---
 
 ### Why does Tokio need so many unsafe blocks?
 
-Rust's async model requires unsafe by design at the runtime level:
-
-| Component | Why unsafe is required |
-|-----------|----------------------|
-| Waker vtable | Raw function pointers — no safe abstraction exists |
-| Task scheduling | Intrusive linked lists, raw pointer manipulation |
-| Pin/Future polling | `Pin::new_unchecked` throughout async state machines |
-| UnsafeCell task state | Shared mutable state in a scheduler — unavoidable |
-| epoll/io_uring | Raw file descriptors — kernel interface |
-
-Tokio is brilliant engineering and its unsafe is careful and justified. The problem is you are reimplementing in unsafe Rust what Go already solved safely in its own runtime since 2009. gxgr sidesteps the problem entirely by **never implementing a Rust async runtime at all.**
+Rust's async model requires unsafe by design at the runtime level — Waker vtables need raw function pointers, task scheduling needs intrusive linked lists, Pin needs `Pin::new_unchecked`, and UnsafeCell is unavoidable in a scheduler. Tokio is brilliant engineering — but you are reimplementing in unsafe Rust what Go already solved safely in 2009. gxgr sidesteps the problem by **never implementing a Rust async runtime at all.**
 
 ---
 
 ### Can a Go panic escape the hatch and crash the Rust process?
 
-No. Every hatch wraps execution in `defer/recover`. Panics are caught at the boundary, the arena is reclaimed, and gxN marks the node as `Panicked`. The Rust supervisor never sees the panic.
+No. Every hatch wraps execution in `defer/recover`. Panics are caught at the boundary, the arena is reclaimed, gxN marks the node `Panicked`. Rust never sees the panic.
 
 ```go
-func Hatch(arenaPtr uintptr, arenaSize int, fn func(*Arena)) {
-    arena := newArena(arenaPtr, arenaSize)
-    defer func() {
-        if r := recover(); r != nil {
-            SignalPanic(r)  // caught — never escapes to Rust
-        }
-    }()
-    fn(arena)
-    SignalDone()
-}
+defer func() {
+    if r := recover(); r != nil {
+        SignalPanic(r)  // caught — never escapes to Rust
+    }
+}()
 ```
 
 ---
 
-### gxgr vs Tokio vs Smol — when to choose what?
+### Why zig cc instead of gcc or clang?
 
-| | Tokio | Smol | gxgr |
-|---|---|---|---|
-| Unsafe total | ~150 | ~60 | **2** |
-| Concurrency model | Rust Futures/Wakers | Rust Futures | Go goroutines |
-| Supervision tree | external crate | external crate | **built-in gxo** |
-| Budget enforcement | none | none | **ga templates** |
-| Multi-supervisor | one runtime | one runtime | **gx1..gxN independent** |
-| Maturity | production (2019) | production (2020) | concept (2026) |
-
-**Choose Tokio** — pure Rust shop, already in Tokio ecosystem, proven production needs.
-
-**Choose Smol** — lightweight pure Rust async, minimal overhead.
-
-**Choose gxgr** — zero unsafe is a hard requirement, need built-in supervision trees, systems-level work, team knows Go.
-
----
-
-### Why zig cc? Why not gcc or clang?
-
-| Property | gcc/clang | zig cc |
-|----------|-----------|--------|
-| musl static targeting | Complex setup | Built-in, trivial |
-| Cross-compilation | Separate toolchain per target | One install, all targets |
-| Dev = Prod | Dev uses glibc, prod uses musl | musl everywhere, identical |
-| Install | Package manager required | Single static binary download |
-
-zig cc is used in **both dev and release** — not just at deploy time. Dev environment is identical to production. No "works on my machine" surprises. zig itself is a single static binary — even your build tool has no external dependencies.
+zig cc handles musl static targeting trivially, cross-compiles to any target from one install, and is itself a single static binary — no package manager needed. Most importantly: **zig cc is used in both dev and release**, making dev and prod environments identical. No "works on my machine" surprises at deploy time.
 
 ---
 
@@ -819,10 +675,10 @@ zig cc is used in **both dev and release** — not just at deploy time. Dev envi
 
 ```bash
 # Step 1 — Go compiles to C-compatible static archive
-CGO_ENABLED=1 go build -buildmode=c-archive -o target/gx.a ./gx/...
+CGO_ENABLED=1 go build -buildmode=c-archive -o target/xg.a ./xg/...
 
-# Step 2 — Rust compiles and links Go archive
-RUSTFLAGS="-L target/ -l static=gx" \
+# Step 2 — Rust compiles and links the Go archive
+RUSTFLAGS="-L target/ -l static=xg" \
 cargo build --target x86_64-unknown-linux-musl --release
 
 # Result
@@ -830,4 +686,14 @@ $ ldd myapp
 not a dynamic executable  ← zero external dependencies
 ```
 
-The final binary contains: Rust code + Go runtime + Go hatches + musl libc + CGo bridge. ~8–15MB stripped. Runs on bare metal, scratch containers, embedded Linux.
+One binary. Rust code + Go runtime + Go hatches + musl libc + CGo bridge. ~8–15MB stripped.
+
+---
+
+### Is gxgr production ready?
+
+For production async work today: **Tokio is the answer.** gxgr is the answer when you need zero unsafe + built-in supervision + systems-level memory control — and are willing to be early.
+
+> Use Tokio today. Watch gxgr. Build gxgr. 🔥
+
+---
